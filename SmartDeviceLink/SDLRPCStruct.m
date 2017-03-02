@@ -12,6 +12,9 @@
 - (id)initWithDictionary:(NSMutableDictionary *)dict {
     if (self = [super init]) {
         if (dict != nil) {
+            if (![self sdl_isDictionaryValid:dict]) {
+                return nil;
+            }
             store = dict;
         } else {
             store = [[NSMutableDictionary alloc] init];
@@ -83,6 +86,23 @@
 
 - (void)dealloc {
     store = nil;
+}
+
+- (BOOL)sdl_isDictionaryValid:(NSMutableDictionary*)dict {
+    BOOL isValid = YES;
+    for (NSString *key in dict.allKeys) {
+        id value = dict[key];
+        if ([value isKindOfClass:[NSDictionary class]]) {
+            isValid = [self sdl_isDictionaryValid:value];
+        } else if ([value isKindOfClass:[NSNull class]]) {
+            isValid = NO;
+        }
+        
+        if (!isValid) {
+            break;
+        }
+    }
+    return isValid;
 }
 
 @end

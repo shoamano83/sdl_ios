@@ -107,6 +107,7 @@ SDLLifecycleState *const SDLLifecycleStateReady = @"Ready";
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(transportDidDisconnect) name:SDLTransportDidDisconnect object:_notificationDispatcher];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(hmiStatusDidChange:) name:SDLDidChangeHMIStatusNotification object:_notificationDispatcher];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(remoteHardwareDidUnregister:) name:SDLDidReceiveAppUnregisteredNotification object:_notificationDispatcher];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(didReceiveError:) name:SDLDidReceiveError object:_notificationDispatcher];
 
     return self;
 }
@@ -491,6 +492,14 @@ SDLLifecycleState *const SDLLifecycleStateReady = @"Ready";
     } else {
         [self.lifecycleStateMachine transitionToState:SDLLifecycleStateReconnecting];
     }
+}
+
+- (void)didReceiveError:(NSNotification *)notification {
+    NSError *error = notification.userInfo[SDLNotificationUserInfoObject];
+    
+    [SDLDebugTool logFormat:@"Received an error: %@. Disconnecting…", error.localizedFailureReason];
+    
+    [self.lifecycleStateMachine transitionToState:SDLLifecycleStateStopped];
 }
 
 @end

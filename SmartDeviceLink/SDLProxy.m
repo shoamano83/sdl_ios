@@ -54,6 +54,7 @@ const float startSessionTime = 10.0;
 const float notifyProxyClosedDelay = 0.1;
 const int POLICIES_CORRELATION_ID = 65535;
 
+NSString *const SDLProxyErrorDomain = @"com.sdl.proxy";
 
 @interface SDLProxy () {
     SDLLockScreenStatusManager *_lsm;
@@ -303,6 +304,13 @@ const int POLICIES_CORRELATION_ID = 65535;
 
 - (void)handleRPCDictionary:(NSDictionary *)dict {
     SDLRPCMessage *message = [[SDLRPCMessage alloc] initWithDictionary:[dict mutableCopy]];
+    
+    if (!message) {
+        NSException *exception = [NSException exceptionWithName:@"Invalid JSON" reason:@"Received invalid JSON from Core." userInfo:nil];
+        [self onError:@"Invalid JSON" exception:exception];
+        return;
+    }
+    
     NSString *functionName = [message getFunctionName];
     NSString *messageType = [message messageType];
 

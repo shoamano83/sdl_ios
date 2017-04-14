@@ -128,6 +128,18 @@ typedef void (^SDLStreamingEncryptionStartBlock)(BOOL success, BOOL encryption, 
 - (BOOL)sendVideoData:(CVImageBufferRef)imageBuffer;
 
 /**
+ *  This method receives raw image data and will run iOS8+'s hardware video encoder to turn the data into a video stream, which will then be passed to the connected head unit.
+ *
+ *  @param imageBuffer A CVImageBufferRef to be encoded by Video Toolbox
+ *  @param pts A presentation timestamp for the frame, or kCMTimeInvalid if timestamp is unknown. If it's valid, it must be greater than the previous one.
+ *
+ *  @return Whether or not the data was successfully encoded and sent.
+ *
+ *  @note Caller should not mix sendVideoData: and sendVideoData:pts: calls.
+ */
+- (BOOL)sendVideoData:(CVImageBufferRef)imageBuffer pts:(CMTime)pts;
+
+/**
  *  This method will attempt to start an audio session
  *
  *  @param startBlock A block that will be called with the result of attempting to start an audio session

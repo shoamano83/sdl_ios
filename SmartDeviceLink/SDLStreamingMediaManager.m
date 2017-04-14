@@ -17,6 +17,8 @@
 #import "SDLImageResolution.h"
 #import "SDLScreenParams.h"
 #import "SDLTouchManager.h"
+#import "SDLH264ByteStreamPacketizer.h"
+#import "SDLRTPH264Packetizer.h"
 
 
 NSString *const SDLErrorDomainStreamingMediaVideo = @"com.sdl.streamingmediamanager.video";
@@ -46,6 +48,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (copy, nonatomic, nullable) SDLStreamingEncryptionStartBlock audioStartBlock;
 
 @property (nonatomic, strong, readwrite) SDLTouchManager *touchManager;
+
+@property (nonatomic) id<SDLH264Packetizer> packetizer;
+@property (assign, nonatomic) double timestampOffset;
 
 @end
 
@@ -110,6 +115,14 @@ NS_ASSUME_NONNULL_BEGIN
                                              selector:@selector(sdl_applicationDidResignActive:)
                                                  name:UIApplicationWillResignActiveNotification
                                                object:nil];
+
+    BOOL useRTP = NO;
+    if (useRTP) {
+        _packetizer = [[SDLRTPH264Packetizer alloc] init];
+    } else {
+        _packetizer = [[SDLH264ByteStreamPacketizer alloc] init];
+    }
+    _timestampOffset = 0.0;
 
     return self;
 }
@@ -202,13 +215,22 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark - Send media data
 
 - (BOOL)sendVideoData:(CVImageBufferRef)imageBuffer {
+    return [self sendVideoData:imageBuffer pts:kCMTimeInvalid];
+}
+
+- (BOOL)sendVideoData:(CVImageBufferRef)imageBuffer pts:(CMTime)pts {
     if (!self.videoSessionConnected) {
         return NO;
     }
 
+    if (!CMTIME_IS_VALID(pts)) {
+        pts = CMTimeMake(self.currentFrameNumber, 30);
+    }
+    self.currentFrameNumber++;
+
     // TODO (Joel F.)[2015-08-17]: Somehow monitor connection to make sure we're not clogging the connection with data.
     // This will come out in -[self sdl_videoEncoderOutputCallback]
-    OSStatus status = VTCompressionSessionEncodeFrame(_compressionSession, imageBuffer, CMTimeMake(self.currentFrameNumber++, 30), kCMTimeInvalid, NULL, (__bridge void *)self, NULL);
+    OSStatus status = VTCompressionSessionEncodeFrame(_compressionSession, imageBuffer, pts, kCMTimeInvalid, NULL, (__bridge void *)self, NULL);
 
     return (status == noErr);
 }
@@ -389,12 +411,26 @@ void sdl_videoEncoderOutputCallback(void * CM_NULLABLE outputCallbackRefCon, voi
     }
     
     SDLStreamingMediaManager *mediaManager = (__bridge SDLStreamingMediaManager *)sourceFrameRefCon;
-    NSData *elementaryStreamData = [mediaManager.class sdl_encodeElementaryStreamWithSampleBuffer:sampleBuffer];
+    NSArray *nalUnits = [mediaManager.class sdl_extractNalUnitsFromSampleBuffer:sampleBuffer];
 
-    if (mediaManager.videoSessionEncrypted) {
-        [mediaManager.protocol sendEncryptedRawData:elementaryStreamData onService:SDLServiceTypeVideo];
-    } else {
-        [mediaManager.protocol sendRawData:elementaryStreamData withServiceType:SDLServiceTypeVideo];
+    const CMTime ptsInCMTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
+    double pts = 0.0;
+    if (CMTIME_IS_VALID(ptsInCMTime)) {
+        pts = CMTimeGetSeconds(ptsInCMTime);
+    }
+    if (mediaManager.timestampOffset == 0.0) {
+        // remember this first PTS as the offset
+        mediaManager.timestampOffset = pts;
+    }
+
+    NSArray *packets = [mediaManager.packetizer createPackets:nalUnits pts:(pts - mediaManager.timestampOffset)];
+
+    for (NSData *packet in packets) {
+        if (mediaManager.videoSessionEncrypted) {
+            [mediaManager.protocol sendEncryptedRawData:packet onService:SDLServiceTypeVideo];
+        } else {
+            [mediaManager.protocol sendRawData:packet withServiceType:SDLServiceTypeVideo];
+        }
     }
 }
 
@@ -461,10 +497,10 @@ void sdl_videoEncoderOutputCallback(void * CM_NULLABLE outputCallbackRefCon, voi
 
 #pragma mark Elementary Stream Formatting
 
-+ (NSData *)sdl_encodeElementaryStreamWithSampleBuffer:(CMSampleBufferRef)sampleBuffer {
++ (NSArray *)sdl_extractNalUnitsFromSampleBuffer:(CMSampleBufferRef)sampleBuffer {
     // Creating an elementaryStream: http://stackoverflow.com/questions/28396622/extracting-h264-from-cmblockbuffer
 
-    NSMutableData *elementaryStream = [NSMutableData data];
+    NSMutableArray *nalUnits = [NSMutableArray array];
     BOOL isIFrame = NO;
     CFArrayRef attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, 0);
 
@@ -478,10 +514,6 @@ void sdl_videoEncoderOutputCallback(void * CM_NULLABLE outputCallbackRefCon, voi
         // Find out if the sample buffer contains an I-Frame (sync frame). If so we will write the SPS and PPS NAL units to the elementary stream.
         isIFrame = !keyExists || !CFBooleanGetValue(notSync);
     }
-
-    // This is the start code that we will write to the elementary stream before every NAL unit
-    static const size_t startCodeLength = 4;
-    static const uint8_t startCode[] = {0x00, 0x00, 0x00, 0x01};
 
     // Write the SPS and PPS NAL units to the elementary stream before every I-Frame
     if (isIFrame) {
@@ -507,9 +539,9 @@ void sdl_videoEncoderOutputCallback(void * CM_NULLABLE outputCallbackRefCon, voi
                                                                NULL,
                                                                NULL);
 
-            // Write the parameter set to the elementary stream
-            [elementaryStream appendBytes:startCode length:startCodeLength];
-            [elementaryStream appendBytes:parameterSetPointer length:parameterSetLength];
+            // Output the parameter set
+            NSData *nalUnit = [NSData dataWithBytesNoCopy:(uint8_t *)parameterSetPointer length:parameterSetLength freeWhenDone:NO];
+            [nalUnits addObject:nalUnit];
         }
     }
 
@@ -530,17 +562,17 @@ void sdl_videoEncoderOutputCallback(void * CM_NULLABLE outputCallbackRefCon, voi
 
         // Convert the length value from Big-endian to Little-endian
         NALUnitLength = CFSwapInt32BigToHost(NALUnitLength);
-        [elementaryStream appendBytes:startCode length:startCodeLength];
 
         // Write the NAL unit without the AVCC length header to the elementary stream
-        [elementaryStream appendBytes:bufferDataPointer + bufferOffset + AVCCHeaderLength length:NALUnitLength];
+        NSData *nalUnit = [NSData dataWithBytesNoCopy:bufferDataPointer + bufferOffset + AVCCHeaderLength length:NALUnitLength freeWhenDone:NO];
+        [nalUnits addObject:nalUnit];
 
         // Move to the next NAL unit in the block buffer
         bufferOffset += AVCCHeaderLength + NALUnitLength;
     }
 
 
-    return elementaryStream;
+    return nalUnits;
 }
 
 #pragma mark - Private static singleton variables
